@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Autogenerate Typescript types from MCP servers to be consumed by AI SDK (or any other framework)",
   "license": "MIT",
+  "bin": {
+    "mcp-to-typescript-codegen": "./dist/index.js"
+  },
   "files": [
     "dist"
   ],
