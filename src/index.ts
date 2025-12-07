@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
-import path from "node:path";
-import { parseArgs } from "node:util";
-import { Project, VariableDeclarationKind } from "ts-morph";
-import * as prettier from "prettier";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { parseArgs } from 'node:util';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import * as prettier from 'prettier';
+import { Project, VariableDeclarationKind } from 'ts-morph';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI Setup
@@ -16,13 +16,13 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const { values } = parseArgs({
   options: {
-    command: { type: "string", short: "c" },
-    args: { type: "string", short: "a" },
-    server: { type: "string", short: "s" },
-    output: { type: "string", short: "o" },
-    name: { type: "string", short: "n" },
-    help: { type: "boolean", short: "h" },
-    debug: { type: "boolean", short: "d" },
+    command: { type: 'string', short: 'c' },
+    args: { type: 'string', short: 'a' },
+    server: { type: 'string', short: 's' },
+    output: { type: 'string', short: 'o' },
+    name: { type: 'string', short: 'n' },
+    help: { type: 'boolean', short: 'h' },
+    debug: { type: 'boolean', short: 'd' },
   },
 });
 
@@ -62,11 +62,11 @@ function createTransport(): Transport {
   if (values.command) {
     return new StdioClientTransport({
       command: values.command,
-      args: values.args?.split(",") ?? [],
+      args: values.args?.split(',') ?? [],
     });
   }
 
-  throw new Error("Must specify either --command or --server");
+  throw new Error('Must specify either --command or --server');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ function toPascalCase(str: string): string {
   return str
     .split(/[-_\s]/)
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join("");
+    .join('');
 }
 
 function toCamelCase(str: string): string {
@@ -86,7 +86,7 @@ function toCamelCase(str: string): string {
 }
 
 function toValidIdentifier(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_]/g, "_");
+  return name.replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,40 +109,39 @@ type JsonSchema = {
 };
 
 function jsonSchemaToTS(schema: JsonSchema): string {
-  if (!schema || typeof schema !== "object") {
-    return "unknown";
+  if (!schema || typeof schema !== 'object') {
+    return 'unknown';
   }
 
   // Enum → union of literals
   if (schema.enum) {
-    return schema.enum.map((v) => JSON.stringify(v)).join(" | ");
+    return schema.enum.map((v) => JSON.stringify(v)).join(' | ');
   }
 
   // oneOf/anyOf → union
   if (schema.oneOf || schema.anyOf) {
     const variants = schema.oneOf || schema.anyOf || [];
-    return variants.map((v) => jsonSchemaToTS(v)).join(" | ");
+    return variants.map((v) => jsonSchemaToTS(v)).join(' | ');
   }
 
   // allOf → intersection
   if (schema.allOf) {
-    return schema.allOf.map((v) => jsonSchemaToTS(v)).join(" & ");
+    return schema.allOf.map((v) => jsonSchemaToTS(v)).join(' & ');
   }
 
   // By type
   switch (schema.type) {
-    case "string":
-      return "string";
-    case "number":
-    case "integer":
-      return "number";
-    case "boolean":
-      return "boolean";
-    case "null":
-      return "null";
-    case "array":
-      return schema.items ? `(${jsonSchemaToTS(schema.items)})[]` : "unknown[]";
-    case "object":
+    case 'string':
+      return 'string';
+    case 'number':
+    case 'integer':
+      return 'number';
+    case 'boolean':
+      return 'boolean';
+    case 'null':
+      return 'null';
+    case 'array':
+      return schema.items ? `(${jsonSchemaToTS(schema.items)})[]` : 'unknown[]';
     default:
       return objectSchemaToTS(schema);
   }
@@ -152,22 +151,22 @@ function objectSchemaToTS(schema: JsonSchema): string {
   // No properties → empty object or Record type
   if (!schema.properties || Object.keys(schema.properties).length === 0) {
     if (schema.additionalProperties === true) {
-      return "Record<string, unknown>";
+      return 'Record<string, unknown>';
     }
-    if (typeof schema.additionalProperties === "object") {
+    if (typeof schema.additionalProperties === 'object') {
       return `Record<string, ${jsonSchemaToTS(schema.additionalProperties)}>`;
     }
-    return "{}";
+    return '{}';
   }
 
   // Build object type
   const required = new Set(schema.required || []);
   const props = Object.entries(schema.properties).map(([key, prop]) => {
-    const opt = required.has(key) ? "" : "?";
+    const opt = required.has(key) ? '' : '?';
     return `${key}${opt}: ${jsonSchemaToTS(prop)}`;
   });
 
-  return `{ ${props.join("; ")} }`;
+  return `{ ${props.join('; ')} }`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,63 +180,63 @@ async function main() {
   }
 
   if (!values.command && !values.server) {
-    console.error("Error: Must specify either --command or --server\n");
+    console.error('Error: Must specify either --command or --server\n');
     printHelp();
     process.exit(1);
   }
 
-  const outputFile = path.resolve(values.output ?? "generated/mcp-tools.ts");
-  const prefix = values.name ? toPascalCase(values.name) : "";
-  const prefixCamel = values.name ? toCamelCase(values.name) : "";
+  const outputFile = path.resolve(values.output ?? 'generated/mcp-tools.ts');
+  const prefix = values.name ? toPascalCase(values.name) : '';
+  const prefixCamel = values.name ? toCamelCase(values.name) : '';
 
-  console.log("🔌 Starting MCP Codegen…");
+  console.log('🔌 Starting MCP Codegen…');
 
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
 
   // Connect to MCP server
   const transport = createTransport();
   const client = new Client(
-    { name: "mcp-codegen", version: "1.0.0" },
-    { capabilities: {} }
+    { name: 'mcp-codegen', version: '1.0.0' },
+    { capabilities: {} },
   );
   await client.connect(transport);
 
   // Fetch tools
-  console.log("🔍 Introspecting MCP tools…");
+  console.log('🔍 Introspecting MCP tools…');
   const { tools } = await client.listTools();
 
   if (values.debug) {
-    console.log("\n📋 Raw tool schemas from server:");
+    console.log('\n📋 Raw tool schemas from server:');
     for (const tool of tools) {
       console.log(`\n--- ${tool.name} ---`);
-      console.log("inputSchema:", JSON.stringify(tool.inputSchema, null, 2));
+      console.log('inputSchema:', JSON.stringify(tool.inputSchema, null, 2));
       console.log(
-        "outputSchema:",
+        'outputSchema:',
         tool.outputSchema
           ? JSON.stringify(tool.outputSchema, null, 2)
-          : "(not defined)"
+          : '(not defined)',
       );
     }
-    console.log("\n");
+    console.log('\n');
   }
 
   if (tools.length === 0) {
-    console.warn("⚠️  No tools found");
+    console.warn('⚠️  No tools found');
     await client.close();
     process.exit(0);
   }
 
   // Create ts-morph project
   const project = new Project({ useInMemoryFileSystem: true });
-  const sourceFile = project.createSourceFile(outputFile, "", {
+  const sourceFile = project.createSourceFile(outputFile, '', {
     overwrite: true,
   });
 
   // Add header comment
   sourceFile.addStatements([
-    "// Auto-generated by mcp-to-typescript-codegen",
-    "// Do not edit manually",
-    "",
+    '// Auto-generated by mcp-to-typescript-codegen',
+    '// Do not edit manually',
+    '',
   ]);
 
   // Generate types for each tool
@@ -265,7 +264,7 @@ async function main() {
   sourceFile.addTypeAlias({
     name: `${prefix}ToolName`,
     isExported: true,
-    type: tools.map((t) => `"${t.name}"`).join(" | "),
+    type: tools.map((t) => `"${t.name}"`).join(' | '),
   });
 
   // Tool names array
@@ -275,14 +274,14 @@ async function main() {
     declarations: [
       {
         name: `${prefixCamel}toolNames`,
-        initializer: `[${tools.map((t) => `"${t.name}"`).join(", ")}] as const`,
+        initializer: `[${tools.map((t) => `"${t.name}"`).join(', ')}] as const`,
       },
     ],
   });
 
   // Format with prettier and write output
   const formatted = await prettier.format(sourceFile.getFullText(), {
-    parser: "typescript",
+    parser: 'typescript',
   });
   fs.writeFileSync(outputFile, formatted);
 
@@ -292,6 +291,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("❌ Error:", err);
+  console.error('❌ Error:', err);
   process.exit(1);
 });
