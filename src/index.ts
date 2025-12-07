@@ -3,8 +3,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { Project, QuoteKind, VariableDeclarationKind } from "ts-morph";
-import { jsonSchemaToZod } from "json-schema-to-zod";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -67,18 +65,102 @@ function toPascalCase(str: string): string {
 }
 
 function toValidIdentifier(name: string): string {
-  // Handle special characters, ensure valid TS identifier
   return name.replace(/[^a-zA-Z0-9_]/g, "_");
 }
 
-function fixZodSchema(zodString: string): string {
-  // Fix .default(null) on non-nullable types by inserting .nullable() before .default(null)
-  // Handles cases with optional .describe() or other chained methods in between
-  // e.g., .string().describe("...").default(null) -> .string().nullable().describe("...").default(null)
-  return zodString.replace(
-    /(\.(string|number|boolean|date|bigint|symbol)\(\))((?:\.[a-z]+\([^)]*\))*)\.default\(null\)/g,
-    "$1.nullable()$3.default(null)"
-  );
+type JsonSchema = {
+  type?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  description?: string;
+  enum?: unknown[];
+  oneOf?: JsonSchema[];
+  anyOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  $ref?: string;
+  default?: unknown;
+  additionalProperties?: boolean | JsonSchema;
+};
+
+function jsonSchemaToTS(schema: JsonSchema, indent = 0): string {
+  const spaces = "  ".repeat(indent);
+
+  if (!schema || typeof schema !== "object") {
+    return "unknown";
+  }
+
+  // Handle enum
+  if (schema.enum) {
+    return schema.enum.map((v) => JSON.stringify(v)).join(" | ");
+  }
+
+  // Handle oneOf/anyOf
+  if (schema.oneOf || schema.anyOf) {
+    const variants = schema.oneOf || schema.anyOf || [];
+    return variants.map((v) => jsonSchemaToTS(v, indent)).join(" | ");
+  }
+
+  // Handle allOf (intersection)
+  if (schema.allOf) {
+    return schema.allOf.map((v) => jsonSchemaToTS(v, indent)).join(" & ");
+  }
+
+  // Handle by type
+  switch (schema.type) {
+    case "string":
+      return "string";
+    case "number":
+    case "integer":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "null":
+      return "null";
+    case "array":
+      if (schema.items) {
+        return `${jsonSchemaToTS(schema.items, indent)}[]`;
+      }
+      return "unknown[]";
+    case "object":
+      if (!schema.properties || Object.keys(schema.properties).length === 0) {
+        if (schema.additionalProperties === true) {
+          return "Record<string, unknown>";
+        }
+        if (
+          schema.additionalProperties &&
+          typeof schema.additionalProperties === "object"
+        ) {
+          return `Record<string, ${jsonSchemaToTS(schema.additionalProperties, indent)}>`;
+        }
+        return "Record<string, unknown>";
+      }
+
+      const required = new Set(schema.required || []);
+      const props = Object.entries(schema.properties).map(([key, prop]) => {
+        const optional = required.has(key) ? "" : "?";
+        const comment = prop.description
+          ? `${spaces}  /** ${prop.description} */\n`
+          : "";
+        return `${comment}${spaces}  ${key}${optional}: ${jsonSchemaToTS(prop, indent + 1)};`;
+      });
+
+      return `{\n${props.join("\n")}\n${spaces}}`;
+    default:
+      // No type specified, check for properties
+      if (schema.properties) {
+        const required = new Set(schema.required || []);
+        const props = Object.entries(schema.properties).map(([key, prop]) => {
+          const optional = required.has(key) ? "" : "?";
+          const comment = prop.description
+            ? `${spaces}  /** ${prop.description} */\n`
+            : "";
+          return `${comment}${spaces}  ${key}${optional}: ${jsonSchemaToTS(prop, indent + 1)};`;
+        });
+        return `{\n${props.join("\n")}\n${spaces}}`;
+      }
+      return "unknown";
+  }
 }
 
 async function main() {
@@ -97,7 +179,6 @@ async function main() {
 
   console.log("🔌 Starting MCP Codegen…");
 
-  // Ensure output directory exists
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
 
   const transport = createTransport();
@@ -119,8 +200,16 @@ async function main() {
     console.log("\n📋 Raw tool schemas from server:");
     tools.forEach((tool) => {
       console.log(`\n--- ${tool.name} ---`);
-      console.log("inputSchema:", JSON.stringify(tool.inputSchema, null, 2));
-      console.log("outputSchema:", tool.outputSchema ? JSON.stringify(tool.outputSchema, null, 2) : "(not defined)");
+      console.log(
+        "inputSchema:",
+        JSON.stringify(tool.inputSchema, null, 2)
+      );
+      console.log(
+        "outputSchema:",
+        tool.outputSchema
+          ? JSON.stringify(tool.outputSchema, null, 2)
+          : "(not defined)"
+      );
     });
     console.log("\n");
   }
@@ -131,133 +220,47 @@ async function main() {
     process.exit(0);
   }
 
-  // Prepare TypeScript project
-  const project = new Project({
-    useInMemoryFileSystem: false,
-    manipulationSettings: { quoteKind: QuoteKind.Single },
-  });
+  // Generate TypeScript declarations
+  const lines: string[] = [
+    "// Auto-generated by mcp-to-typescript-codegen",
+    "// Do not edit manually",
+    "",
+  ];
 
-  const source = project.createSourceFile(outputFile, "", { overwrite: true });
-
-  // Add imports
-  source.addImportDeclaration({
-    namedImports: ["z"],
-    moduleSpecifier: "zod",
-  });
-
-  source.addStatements(""); // blank line
-
-  // Generate individual schemas and types for each tool
   tools.forEach((tool) => {
-    const { name, description, inputSchema } = tool;
-    const schemaName = `${toPascalCase(toValidIdentifier(name))}Schema`;
+    const { name, inputSchema } = tool;
     const typeName = `${toPascalCase(toValidIdentifier(name))}Params`;
 
-    let zodSchemaString = "z.any()";
-    try {
-      zodSchemaString = fixZodSchema(jsonSchemaToZod(inputSchema).toString());
-    } catch (err) {
-      console.warn(`⚠️  Failed to convert schema for tool: ${name}`);
-      console.warn(`   Using z.any() as fallback`);
-    }
+    // Generate input type
+    const tsType = jsonSchemaToTS(inputSchema as JsonSchema);
+    lines.push(`export type ${typeName} = ${tsType};`);
+    lines.push("");
 
-    // Add JSDoc comment
-    source.addStatements(
-      `/**\n * ${description || `Parameters for ${name}`}\n */`
-    );
-
-    // Export Zod schema
-    source.addVariableStatement({
-      declarationKind: VariableDeclarationKind.Const,
-      isExported: true,
-      declarations: [
-        {
-          name: schemaName,
-          initializer: zodSchemaString,
-        },
-      ],
-    });
-
-    // Export inferred TypeScript type
-    source.addTypeAlias({
-      name: typeName,
-      isExported: true,
-      type: `z.infer<typeof ${schemaName}>`,
-    });
-
-    source.addStatements(""); // blank line
-
-    // Generate output schema if present
+    // Generate output type if present
     if (tool.outputSchema) {
-      const outputSchemaName = `${toPascalCase(toValidIdentifier(name))}OutputSchema`;
       const outputTypeName = `${toPascalCase(toValidIdentifier(name))}Output`;
-
-      let zodOutputString = "z.any()";
-      try {
-        zodOutputString = fixZodSchema(jsonSchemaToZod(tool.outputSchema).toString());
-      } catch (err) {
-        console.warn(`⚠️  Failed to convert output schema for tool: ${name}`);
-        console.warn(`   Using z.any() as fallback`);
-      }
-
-      source.addStatements(`/**\n * Output for ${name}\n */`);
-
-      source.addVariableStatement({
-        declarationKind: VariableDeclarationKind.Const,
-        isExported: true,
-        declarations: [{ name: outputSchemaName, initializer: zodOutputString }],
-      });
-
-      source.addTypeAlias({
-        name: outputTypeName,
-        isExported: true,
-        type: `z.infer<typeof ${outputSchemaName}>`,
-      });
-
-      source.addStatements(""); // blank line
+      const outputTsType = jsonSchemaToTS(tool.outputSchema as JsonSchema);
+      lines.push(`export type ${outputTypeName} = ${outputTsType};`);
+      lines.push("");
     }
   });
 
-  // Generate the main mcpTools object
-  source.addVariableStatement({
-    declarationKind: VariableDeclarationKind.Const,
-    isExported: true,
-    declarations: [
-      {
-        name: "mcpTools",
-        initializer: (writer) => {
-          writer.write("{\n");
-          tools.forEach((tool, index) => {
-            const { name, description } = tool;
-            const schemaName = `${toPascalCase(toValidIdentifier(name))}Schema`;
+  // Generate tool names union
+  lines.push(
+    `export type ToolName = ${tools.map((t) => JSON.stringify(t.name)).join(" | ")};`
+  );
+  lines.push("");
 
-            writer.write(`  /**\n   * ${description || name}\n   */\n`);
-            writer.write(`  ${JSON.stringify(name)}: {\n`);
-            writer.write(`    description: ${JSON.stringify(description)},\n`);
-            writer.write(`    parameters: ${schemaName},\n`);
-            if (tool.outputSchema) {
-              const outputSchemaName = `${toPascalCase(toValidIdentifier(name))}OutputSchema`;
-              writer.write(`    output: ${outputSchemaName},\n`);
-            }
-            writer.write(`  }${index < tools.length - 1 ? "," : ""}\n`);
-          });
-          writer.write("} as const");
-        },
-      },
-    ],
+  // Generate tool names array
+  lines.push("export const toolNames = [");
+  tools.forEach((tool, index) => {
+    const comma = index < tools.length - 1 ? "," : "";
+    lines.push(`  ${JSON.stringify(tool.name)}${comma}`);
   });
+  lines.push("] as const;");
 
-  source.addStatements(""); // blank line
-
-  // Export union type of all tool names
-  source.addTypeAlias({
-    name: "ToolName",
-    isExported: true,
-    type: `keyof typeof mcpTools`,
-  });
-
-  // Format and write to disk
-  await project.save();
+  // Write file
+  fs.writeFileSync(outputFile, lines.join("\n") + "\n");
 
   await client.close();
 
