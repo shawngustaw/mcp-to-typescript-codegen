@@ -106,10 +106,24 @@ type JsonSchema = {
   $ref?: string;
   default?: unknown;
   additionalProperties?: boolean | JsonSchema;
+  definitions?: Record<string, JsonSchema>;
 };
 
-function jsonSchemaToTS(schema: JsonSchema): string {
+function jsonSchemaToTS(
+  schema: JsonSchema,
+  definitions?: Record<string, JsonSchema>,
+): string {
   if (!schema || typeof schema !== 'object') {
+    return 'unknown';
+  }
+
+  // Resolve $ref references
+  if (schema.$ref) {
+    const refPath = schema.$ref.replace('#/definitions/', '');
+    const resolved = definitions?.[refPath];
+    if (resolved) {
+      return jsonSchemaToTS(resolved, definitions);
+    }
     return 'unknown';
   }
 
@@ -121,12 +135,12 @@ function jsonSchemaToTS(schema: JsonSchema): string {
   // oneOf/anyOf → union
   if (schema.oneOf || schema.anyOf) {
     const variants = schema.oneOf || schema.anyOf || [];
-    return variants.map((v) => jsonSchemaToTS(v)).join(' | ');
+    return variants.map((v) => jsonSchemaToTS(v, definitions)).join(' | ');
   }
 
   // allOf → intersection
   if (schema.allOf) {
-    return schema.allOf.map((v) => jsonSchemaToTS(v)).join(' & ');
+    return schema.allOf.map((v) => jsonSchemaToTS(v, definitions)).join(' & ');
   }
 
   // By type
@@ -141,20 +155,25 @@ function jsonSchemaToTS(schema: JsonSchema): string {
     case 'null':
       return 'null';
     case 'array':
-      return schema.items ? `(${jsonSchemaToTS(schema.items)})[]` : 'unknown[]';
+      return schema.items
+        ? `(${jsonSchemaToTS(schema.items, definitions)})[]`
+        : 'unknown[]';
     default:
-      return objectSchemaToTS(schema);
+      return objectSchemaToTS(schema, definitions);
   }
 }
 
-function objectSchemaToTS(schema: JsonSchema): string {
+function objectSchemaToTS(
+  schema: JsonSchema,
+  definitions?: Record<string, JsonSchema>,
+): string {
   // No properties → empty object or Record type
   if (!schema.properties || Object.keys(schema.properties).length === 0) {
     if (schema.additionalProperties === true) {
       return 'Record<string, unknown>';
     }
     if (typeof schema.additionalProperties === 'object') {
-      return `Record<string, ${jsonSchemaToTS(schema.additionalProperties)}>`;
+      return `Record<string, ${jsonSchemaToTS(schema.additionalProperties, definitions)}>`;
     }
     return '{}';
   }
@@ -163,7 +182,7 @@ function objectSchemaToTS(schema: JsonSchema): string {
   const required = new Set(schema.required || []);
   const props = Object.entries(schema.properties).map(([key, prop]) => {
     const opt = required.has(key) ? '' : '?';
-    return `${key}${opt}: ${jsonSchemaToTS(prop)}`;
+    return `${key}${opt}: ${jsonSchemaToTS(prop, definitions)}`;
   });
 
   return `{ ${props.join('; ')} }`;
@@ -242,20 +261,22 @@ async function main() {
   // Generate types for each tool
   for (const tool of tools) {
     const toolId = toPascalCase(toValidIdentifier(tool.name));
+    const inputSchema = tool.inputSchema as JsonSchema;
+    const outputSchema = tool.outputSchema as JsonSchema | undefined;
 
     // Input params type
     sourceFile.addTypeAlias({
       name: `${prefix}${toolId}Params`,
       isExported: true,
-      type: jsonSchemaToTS(tool.inputSchema as JsonSchema),
+      type: jsonSchemaToTS(inputSchema, inputSchema.definitions),
     });
 
     // Output type (if defined)
-    if (tool.outputSchema) {
+    if (outputSchema) {
       sourceFile.addTypeAlias({
         name: `${prefix}${toolId}Output`,
         isExported: true,
-        type: jsonSchemaToTS(tool.outputSchema as JsonSchema),
+        type: jsonSchemaToTS(outputSchema, outputSchema.definitions),
       });
     }
   }
