@@ -3,10 +3,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { Project, VariableDeclarationKind } from "ts-morph";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI Setup
+// ─────────────────────────────────────────────────────────────────────────────
 
 const { values } = parseArgs({
   options: {
@@ -14,6 +19,7 @@ const { values } = parseArgs({
     args: { type: "string", short: "a" },
     server: { type: "string", short: "s" },
     output: { type: "string", short: "o" },
+    name: { type: "string", short: "n" },
     help: { type: "boolean", short: "h" },
     debug: { type: "boolean", short: "d" },
   },
@@ -32,6 +38,7 @@ Options:
   -a, --args <args>     Comma-separated args for the command
   -s, --server <url>    URL of HTTP MCP server (streamable HTTP transport)
   -o, --output <file>   Output file path (default: generated/mcp-tools.ts)
+  -n, --name <prefix>   Prefix for generated type names (e.g., "Apollo")
   -d, --debug           Print raw tool schemas from server
   -h, --help            Show this help message
 
@@ -41,6 +48,10 @@ Examples:
   mcp-to-typescript-codegen --server "http://localhost:3000/mcp"
 `);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transport Factory
+// ─────────────────────────────────────────────────────────────────────────────
 
 function createTransport(): Transport {
   if (values.server) {
@@ -57,6 +68,10 @@ function createTransport(): Transport {
   throw new Error("Must specify either --command or --server");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// String Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 function toPascalCase(str: string): string {
   return str
     .split(/[-_\s]/)
@@ -64,9 +79,18 @@ function toPascalCase(str: string): string {
     .join("");
 }
 
+function toCamelCase(str: string): string {
+  const pascal = toPascalCase(str);
+  return pascal.charAt(0).toLowerCase() + pascal.slice(1);
+}
+
 function toValidIdentifier(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, "_");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON Schema to TypeScript
+// ─────────────────────────────────────────────────────────────────────────────
 
 type JsonSchema = {
   type?: string;
@@ -83,30 +107,28 @@ type JsonSchema = {
   additionalProperties?: boolean | JsonSchema;
 };
 
-function jsonSchemaToTS(schema: JsonSchema, indent = 0): string {
-  const spaces = "  ".repeat(indent);
-
+function jsonSchemaToTS(schema: JsonSchema): string {
   if (!schema || typeof schema !== "object") {
     return "unknown";
   }
 
-  // Handle enum
+  // Enum → union of literals
   if (schema.enum) {
     return schema.enum.map((v) => JSON.stringify(v)).join(" | ");
   }
 
-  // Handle oneOf/anyOf
+  // oneOf/anyOf → union
   if (schema.oneOf || schema.anyOf) {
     const variants = schema.oneOf || schema.anyOf || [];
-    return variants.map((v) => jsonSchemaToTS(v, indent)).join(" | ");
+    return variants.map((v) => jsonSchemaToTS(v)).join(" | ");
   }
 
-  // Handle allOf (intersection)
+  // allOf → intersection
   if (schema.allOf) {
-    return schema.allOf.map((v) => jsonSchemaToTS(v, indent)).join(" & ");
+    return schema.allOf.map((v) => jsonSchemaToTS(v)).join(" & ");
   }
 
-  // Handle by type
+  // By type
   switch (schema.type) {
     case "string":
       return "string";
@@ -118,50 +140,38 @@ function jsonSchemaToTS(schema: JsonSchema, indent = 0): string {
     case "null":
       return "null";
     case "array":
-      if (schema.items) {
-        return `${jsonSchemaToTS(schema.items, indent)}[]`;
-      }
-      return "unknown[]";
+      return schema.items ? `(${jsonSchemaToTS(schema.items)})[]` : "unknown[]";
     case "object":
-      if (!schema.properties || Object.keys(schema.properties).length === 0) {
-        if (schema.additionalProperties === true) {
-          return "Record<string, unknown>";
-        }
-        if (
-          schema.additionalProperties &&
-          typeof schema.additionalProperties === "object"
-        ) {
-          return `Record<string, ${jsonSchemaToTS(schema.additionalProperties, indent)}>`;
-        }
-        return "Record<string, unknown>";
-      }
-
-      const required = new Set(schema.required || []);
-      const props = Object.entries(schema.properties).map(([key, prop]) => {
-        const optional = required.has(key) ? "" : "?";
-        const comment = prop.description
-          ? `${spaces}  /** ${prop.description} */\n`
-          : "";
-        return `${comment}${spaces}  ${key}${optional}: ${jsonSchemaToTS(prop, indent + 1)};`;
-      });
-
-      return `{\n${props.join("\n")}\n${spaces}}`;
     default:
-      // No type specified, check for properties
-      if (schema.properties) {
-        const required = new Set(schema.required || []);
-        const props = Object.entries(schema.properties).map(([key, prop]) => {
-          const optional = required.has(key) ? "" : "?";
-          const comment = prop.description
-            ? `${spaces}  /** ${prop.description} */\n`
-            : "";
-          return `${comment}${spaces}  ${key}${optional}: ${jsonSchemaToTS(prop, indent + 1)};`;
-        });
-        return `{\n${props.join("\n")}\n${spaces}}`;
-      }
-      return "unknown";
+      return objectSchemaToTS(schema);
   }
 }
+
+function objectSchemaToTS(schema: JsonSchema): string {
+  // No properties → empty object or Record type
+  if (!schema.properties || Object.keys(schema.properties).length === 0) {
+    if (schema.additionalProperties === true) {
+      return "Record<string, unknown>";
+    }
+    if (typeof schema.additionalProperties === "object") {
+      return `Record<string, ${jsonSchemaToTS(schema.additionalProperties)}>`;
+    }
+    return "{}";
+  }
+
+  // Build object type
+  const required = new Set(schema.required || []);
+  const props = Object.entries(schema.properties).map(([key, prop]) => {
+    const opt = required.has(key) ? "" : "?";
+    return `${key}${opt}: ${jsonSchemaToTS(prop)}`;
+  });
+
+  return `{ ${props.join("; ")} }`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function main() {
   if (values.help) {
@@ -176,41 +186,37 @@ async function main() {
   }
 
   const outputFile = path.resolve(values.output ?? "generated/mcp-tools.ts");
+  const prefix = values.name ? toPascalCase(values.name) : "";
+  const prefixCamel = values.name ? toCamelCase(values.name) : "";
 
   console.log("🔌 Starting MCP Codegen…");
 
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
 
+  // Connect to MCP server
   const transport = createTransport();
-
   const client = new Client(
-    {
-      name: "mcp-codegen",
-      version: "1.0.0",
-    },
+    { name: "mcp-codegen", version: "1.0.0" },
     { capabilities: {} }
   );
-
   await client.connect(transport);
 
+  // Fetch tools
   console.log("🔍 Introspecting MCP tools…");
   const { tools } = await client.listTools();
 
   if (values.debug) {
     console.log("\n📋 Raw tool schemas from server:");
-    tools.forEach((tool) => {
+    for (const tool of tools) {
       console.log(`\n--- ${tool.name} ---`);
-      console.log(
-        "inputSchema:",
-        JSON.stringify(tool.inputSchema, null, 2)
-      );
+      console.log("inputSchema:", JSON.stringify(tool.inputSchema, null, 2));
       console.log(
         "outputSchema:",
         tool.outputSchema
           ? JSON.stringify(tool.outputSchema, null, 2)
           : "(not defined)"
       );
-    });
+    }
     console.log("\n");
   }
 
@@ -220,50 +226,64 @@ async function main() {
     process.exit(0);
   }
 
-  // Generate TypeScript declarations
-  const lines: string[] = [
+  // Create ts-morph project
+  const project = new Project({ useInMemoryFileSystem: true });
+  const sourceFile = project.createSourceFile(outputFile, "", {
+    overwrite: true,
+  });
+
+  // Add header comment
+  sourceFile.addStatements([
     "// Auto-generated by mcp-to-typescript-codegen",
     "// Do not edit manually",
     "",
-  ];
+  ]);
 
-  tools.forEach((tool) => {
-    const { name, inputSchema } = tool;
-    const typeName = `${toPascalCase(toValidIdentifier(name))}Params`;
+  // Generate types for each tool
+  for (const tool of tools) {
+    const toolId = toPascalCase(toValidIdentifier(tool.name));
 
-    // Generate input type
-    const tsType = jsonSchemaToTS(inputSchema as JsonSchema);
-    lines.push(`export type ${typeName} = ${tsType};`);
-    lines.push("");
+    // Input params type
+    sourceFile.addTypeAlias({
+      name: `${prefix}${toolId}Params`,
+      isExported: true,
+      type: jsonSchemaToTS(tool.inputSchema as JsonSchema),
+    });
 
-    // Generate output type if present
+    // Output type (if defined)
     if (tool.outputSchema) {
-      const outputTypeName = `${toPascalCase(toValidIdentifier(name))}Output`;
-      const outputTsType = jsonSchemaToTS(tool.outputSchema as JsonSchema);
-      lines.push(`export type ${outputTypeName} = ${outputTsType};`);
-      lines.push("");
+      sourceFile.addTypeAlias({
+        name: `${prefix}${toolId}Output`,
+        isExported: true,
+        type: jsonSchemaToTS(tool.outputSchema as JsonSchema),
+      });
     }
+  }
+
+  // Tool name union type
+  sourceFile.addTypeAlias({
+    name: `${prefix}ToolName`,
+    isExported: true,
+    type: tools.map((t) => `"${t.name}"`).join(" | "),
   });
 
-  // Generate tool names union
-  lines.push(
-    `export type ToolName = ${tools.map((t) => JSON.stringify(t.name)).join(" | ")};`
-  );
-  lines.push("");
-
-  // Generate tool names array
-  lines.push("export const toolNames = [");
-  tools.forEach((tool, index) => {
-    const comma = index < tools.length - 1 ? "," : "";
-    lines.push(`  ${JSON.stringify(tool.name)}${comma}`);
+  // Tool names array
+  sourceFile.addVariableStatement({
+    declarationKind: VariableDeclarationKind.Const,
+    isExported: true,
+    declarations: [
+      {
+        name: `${prefixCamel}toolNames`,
+        initializer: `[${tools.map((t) => `"${t.name}"`).join(", ")}] as const`,
+      },
+    ],
   });
-  lines.push("] as const;");
 
-  // Write file
-  fs.writeFileSync(outputFile, lines.join("\n") + "\n");
+  // Write output
+  const output = sourceFile.getFullText();
+  fs.writeFileSync(outputFile, output);
 
   await client.close();
-
   console.log(`✅ Generated ${tools.length} MCP tools → ${outputFile}`);
   process.exit(0);
 }
