@@ -1,6 +1,6 @@
 {
   "name": "mcp-to-typescript-codegen",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generate TypeScript types from MCP (Model Context Protocol) servers.",
   "license": "MIT",
   "author": "shawngustaw",
