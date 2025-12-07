@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { Project, VariableDeclarationKind } from "ts-morph";
+import * as prettier from "prettier";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -279,9 +280,11 @@ async function main() {
     ],
   });
 
-  // Write output
-  const output = sourceFile.getFullText();
-  fs.writeFileSync(outputFile, output);
+  // Format with prettier and write output
+  const formatted = await prettier.format(sourceFile.getFullText(), {
+    parser: "typescript",
+  });
+  fs.writeFileSync(outputFile, formatted);
 
   await client.close();
   console.log(`✅ Generated ${tools.length} MCP tools → ${outputFile}`);

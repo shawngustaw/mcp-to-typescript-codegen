@@ -42,6 +42,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.24.3",
     "json-schema-to-zod": "^2.7.0",
+    "prettier": "^3.7.4",
     "ts-morph": "^27.0.2",
     "zod": "^4.1.13"
   }
